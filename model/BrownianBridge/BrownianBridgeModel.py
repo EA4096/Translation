@@ -115,7 +115,7 @@ class BrownianBridgeModel(nn.Module):
             if t >= self.num_timesteps - 1:
                 recloss = (objective - objective_recon).abs().mean()
             else:
-                if m:
+                if m is not None:
                     reloss = (m * objective - m * objective_recon).abs().mean()
                 else:
                     reloss = (objective - objective_recon).abs().mean()
@@ -124,7 +124,7 @@ class BrownianBridgeModel(nn.Module):
             if t >= self.num_timesteps - 1:
                 recloss = F.mse_loss(objective, objective_recon)
             else:
-                if m:
+                if m is not None:
                     recloss = F.mse_loss(m * objective, m * objective_recon)
                 else:
                     recloss = F.mse_loss(objective, objective_recon)
