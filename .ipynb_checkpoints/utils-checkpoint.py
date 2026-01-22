@@ -13,7 +13,8 @@ from photutils.psf import GaussianPSF
 import torch
 import matplotlib.patches as patches
 import matplotlib.animation as animation
-
+import os
+from PIL import Image
 
 def video2mp4(video, path, fps=24, dpi=400):
     """
@@ -588,37 +589,138 @@ def rescale(data, size):
         
         
         
-def torch2np(tensor):
+def np2t(array):
+    """
+    Convert a NumPy image array to a PyTorch tensor with shape (B, C, H, W).
+    
+    Supports:
+      - (H, W)         → grayscale, becomes (1, 1, H, W)
+      - (H, W, C)      → channels last (e.g. RGB), becomes (1, C, H, W)
+      - (C, H, W)      → channels first, becomes (1, C, H, W)
+    
+    Args:
+        array (np.ndarray): Input image array.
+        
+    Returns:
+        torch.Tensor: Tensor of shape (1, C, H, W).
+    """
+    if not isinstance(array, np.ndarray):
+        raise TypeError("Input must be a NumPy array.")
+    
+    # Handle byte order issues
+    if array.dtype.byteorder not in ('=', '|'):
+        array = array.byteswap().newbyteorder()
+    
+    ndim = array.ndim
+    if ndim == 2:
+        # Grayscale: (H, W) → (1, 1, H, W)
+        tensor = torch.from_numpy(array).unsqueeze(0).unsqueeze(0)
+    elif ndim == 3:
+        H, W = array.shape[-2], array.shape[-1]
+        C = array.shape[0] if array.shape[0] not in (H, W) else array.shape[-1]
+        
+        # Heuristic: if first dim is small (≤4), assume channels-first
+        if array.shape[0] <= 4 and array.shape[0] not in (H, W):
+            # (C, H, W) → already correct order
+            tensor = torch.from_numpy(array).unsqueeze(0)
+        else:
+            # Assume (H, W, C) → move channel to front
+            tensor = torch.from_numpy(array).permute(2, 0, 1).unsqueeze(0)
+    else:
+        raise ValueError(f"Unsupported array shape: {array.shape}. Expected 2D or 3D.")
+    
+    return tensor
+
+
+def t2np(tensor):
+    """
+    Convert a PyTorch tensor to a NumPy array with shape (C, H, W).
+    
+    Input tensor must be in (B, C, H, W) or (C, H, W) format.
+    Output is always (C, H, W).
+    
+    Args:
+        tensor (torch.Tensor): Input tensor.
+        
+    Returns:
+        np.ndarray: Array of shape (C, H, W).
+    """
     if not isinstance(tensor, torch.Tensor):
         raise TypeError("Input must be a PyTorch tensor.")
     
-    if len(tensor.shape) == 4:
-        return np.swapaxes(np.swapaxes(tensor[0].detach().cpu().numpy(), 0, 2), 0, 1)
-    elif len(tensor.shape) == 3:
-        return np.swapaxes(np.swapaxes(tensor.detach().cpu().numpy(), 0, 2), 0, 1)
+    # Move to CPU and detach
+    array = tensor.detach().cpu().numpy()
+    
+    if array.ndim == 4:
+        # (B, C, H, W) → take first batch
+        array = array[0]
+    elif array.ndim == 3:
+        # (C, H, W) → already good
+        pass
+    elif array.ndim == 2:
+        # (H, W) → add channel dim
+        array = array[np.newaxis, :, :]
     else:
-        return tensor.detach().cpu().numpy()
-
-
-def np2torch(array):
+        raise ValueError(f"Unsupported tensor shape: {tensor.shape}. Expected 2D, 3D or 4D.")
     
-    if not isinstance(array, np.ndarray):
-        raise TypeError("Input must be a NumPy array.")
-    tensor = torch.from_numpy(array)
+    return array
+
+
+def get_d(file, fixnans=None, median=False, arcsinh=False, f=1, scale=True):
+    """
+    Get data from given FITS or JPG file.
+    Parameters:
+        file           -- File path (supports .fits and .jpg/.jpeg)
+        fixnans        -- Value to replace NaNs with (e.g., 0). If None, leave as-is.
+                          (Only relevant for FITS; JPGs are integer and typically have no NaNs.)
+        median         -- Whether to subtract the median
+        arcsinh        -- Whether to apply arcsinh transform
+        f              -- arcsinh denominator scale factor
+        scale          -- If True and arcsinh is used, scale result to [0, 1] range.
+                         (Note: if arcsinh=False, this has no effect in current implementation.)
+    Returns:
+        Processed numpy array (dtype float64)
+    """
+    _, ext = os.path.splitext(file)
+    ext = ext.lower()
+
+    if ext in ('.fits', '.fit'):
+        with fits.open(file) as hdul:
+            d = hdul[0].data
+        d = d.astype(np.float64)
+
+    elif ext in ('.jpg', '.jpeg'):
+        # Load as RGB (3 channels)
+        img = Image.open(file).convert('RGB')  # Ensures 3 channels
+        d = np.array(img, dtype=np.float64)
+
+    else:
+        raise ValueError(f"Unsupported file format: {ext}")
+
+    # Handle NaNs (typically only in FITS)
+    if np.isnan(d).any():
+        print("NaN values are present in the array")
+        if fixnans is not None:
+            d = np.nan_to_num(d, nan=fixnans)
+    elif fixnans is not None:
+        # JPGs usually don't have NaNs, but apply fix if explicitly requested
+        d = np.nan_to_num(d, nan=fixnans)
+
+    if median:
+        d = d - np.median(d)
+
+    if arcsinh:
+        d = np.arcsinh(d / f)
+
+    if arcsinh and scale:
+        d_min, d_max = d.min(), d.max()
+        if d_max > d_min:
+            d = (d - d_min) / (d_max - d_min)
+        else:
+            d = np.zeros_like(d)
+
+    return d
     
-    if len(tensor.shape) == 2:
-        return torch.unsqueeze(torch.unsqueeze(tensor, 0), 0)
-
-    elif len(tensor.shape) == 3:
-        return torch.unsqueeze(torch.swapaxes(torch.swapaxes(tensor, 0, 2), 1, 2), 0)
-
-
-def get_h(path):
-    return fits.open(path)[0].header
-
-
-def get_d(path):
-    return fits.open(path)[0].data
 
 def save_img(data, path, ws=5, contrast=.25, 
             origin='upper', mx=None, my=None, mw=None,
@@ -687,7 +789,11 @@ def image_d(data, ws=5, contrast=.25,
         ax.axvline(x=vline, ymin=0.0, ymax=1.0, color='r', linewidth=.75)  # Vertical line at x=2 across full height
 
 
-    ax.imshow(data, cmap=cmap, vmin=z1, vmax=z2, origin=origin)
+    try:
+        ax.imshow(data, cmap=cmap, vmin=z1, vmax=z2, origin=origin)
+
+    except TypeError:
+        ax.imshow(np.transpose(data, (1, 2, 0)), cmap=cmap, vmin=z1, vmax=z2, origin=origin)
 
 
 def hist(data, bins=100, ws=5):
